@@ -13,6 +13,13 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Locate sites.csv
+        run: |
+          echo "Workspace: $GITHUB_WORKSPACE"
+          ls -la
+          find . -maxdepth 3 -name "sites.csv" -print
+
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -24,27 +31,39 @@ jobs:
       - name: Deploy each site from CSV
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-          NETLIFY_TEAM: ${{ secrets.NETLIFY_TEAM }}
+          NETLIFY_TEAM_ID: ${{ secrets.NETLIFY_TEAM }}
           INDEXNOW_KEY: ${{ secrets.INDEXNOW_KEY }}
         run: |
-          CSV_FILE="${{ vars.SITES_CSV || 'sites.csv' }}"
-          PUBLIC_ROOT="${{ vars.PUBLIC_ROOT || 'Public' }}"
+          # берём имя CSV из переменной, иначе по умолчанию sites.csv
+          CSV_FILE="${{ vars.SITES_CSV }}"
+          if [ -z "$CSV_FILE" ]; then CSV_FILE="sites.csv"; fi
+
+          # абсолютный путь
+          CSV_PATH="$GITHUB_WORKSPACE/$CSV_FILE"
+          echo "Using CSV: $CSV_PATH"
+
+          # проверка наличия
+          if [ ! -f "$CSV_PATH" ]; then
+            echo "ERROR: CSV not found at $CSV_PATH"
+            ls -la "$GITHUB_WORKSPACE"
+            exit 1
+          fi
+
+          # корень для папок сайтов
+          PUBLIC_ROOT="${{ vars.PUBLIC_ROOT }}"
+          if [ -z "$PUBLIC_ROOT" ]; then PUBLIC_ROOT="."; fi
+
           while IFS=',' read -r folder site_name domain sitemap
           do
-            # пропускаем заголовок
             if [ "$folder" = "folder" ]; then continue; fi
-
             echo "=== Deploying ${site_name} (${domain}) from ${PUBLIC_ROOT}/${folder}"
 
-            # Если сайт уже создан в Netlify — можно указать --site <site_id|name>
             netlify deploy \
               --auth="$NETLIFY_AUTH_TOKEN" \
               --dir="${PUBLIC_ROOT}/${folder}" \
               --site="$site_name" \
               --prod
 
-            # Пингуем IndexNow (предполагается файл https://domain/INDEXNOWKEY.txt)
-            # Отправляем sitemap, если указан (иначе просто главную)
             if [ -n "$sitemap" ]; then
               URL="https://${domain}/${sitemap}"
             else
@@ -57,6 +76,10 @@ jobs:
                    \"keyLocation\":\"https://${domain}/${INDEXNOW_KEY}.txt\",
                    \"urlList\":[\"${URL}\"]}" \
               https://api.indexnow.org/submit
+
+            echo "IndexNow ping sent for ${domain} -> ${URL}"
+          done < "$CSV_PATH"
+
 
             echo "IndexNow ping sent for ${domain} -> ${URL}"
           done < "$CSV_FILE"
