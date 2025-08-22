@@ -36,7 +36,7 @@ jobs:
         run: |
           # берём имя CSV из переменной, иначе по умолчанию sites.csv
           CSV_FILE="${{ vars.SITES_CSV }}"
-          if [ -z "$CSV_FILE" ]; then CSV_FILE="sites.csv"; fi
+          if [ -z "$CSV_FILE" ]; then CSV_FILE="PT/sites.csv"; fi
 
           # абсолютный путь
           CSV_PATH="$GITHUB_WORKSPACE/$CSV_FILE"
