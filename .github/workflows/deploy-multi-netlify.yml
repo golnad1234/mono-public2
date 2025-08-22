@@ -8,17 +8,19 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Locate sites.csv
+      - name: Locate files (debug)
         run: |
           echo "Workspace: $GITHUB_WORKSPACE"
           ls -la
-          find . -maxdepth 3 -name "sites.csv" -print
-
+          find . -maxdepth 3 -type f -name "sites.csv" -print
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -26,60 +28,80 @@ jobs:
           node-version: '18'
 
       - name: Install Netlify CLI
-        run: npm i -g netlify-cli
+        run: |
+          npm i -g netlify-cli
+          netlify --version
 
       - name: Deploy each site from CSV
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-          NETLIFY_TEAM_ID: ${{ secrets.NETLIFY_TEAM }}
+          NETLIFY_TEAM: ${{ secrets.NETLIFY_TEAM }}
           INDEXNOW_KEY: ${{ secrets.INDEXNOW_KEY }}
+          # Можно переопределить в Settings → Secrets and variables → Actions → Variables
+          SITES_CSV: ${{ vars.SITES_CSV }}
+          PUBLIC_ROOT: ${{ vars.PUBLIC_ROOT }}
         run: |
-          # берём имя CSV из переменной, иначе по умолчанию sites.csv
-          CSV_FILE="${{ vars.SITES_CSV }}"
-          if [ -z "$CSV_FILE" ]; then CSV_FILE="PT/sites.csv"; fi
+          set -euo pipefail
 
-          # абсолютный путь
+          # 1) Пути по умолчанию
+          CSV_FILE="${SITES_CSV:-PT/sites.csv}"
+          PUBLIC_DIR="${PUBLIC_ROOT:-.}"
+
           CSV_PATH="$GITHUB_WORKSPACE/$CSV_FILE"
           echo "Using CSV: $CSV_PATH"
-
-          # проверка наличия
-          if [ ! -f "$CSV_PATH" ]; then
+          if [[ ! -f "$CSV_PATH" ]]; then
             echo "ERROR: CSV not found at $CSV_PATH"
             ls -la "$GITHUB_WORKSPACE"
             exit 1
           fi
 
-          # корень для папок сайтов
-          PUBLIC_ROOT="${{ vars.PUBLIC_ROOT }}"
-          if [ -z "$PUBLIC_ROOT" ]; then PUBLIC_ROOT="."; fi
+          # 2) Читаем CSV: folder,site_name,domain,sitemap
+          #    Пропускаем заголовок и строки-комменты (# ...)
+          #    Удаляем \r на случай CRLF
+          while IFS=',' read -r folder site_name domain sitemap; do
+            # trim CR
+            folder="${folder%%[$'\r\n']}"
+            site_name="${site_name%%[$'\r\n']}"
+            domain="${domain%%[$'\r\n']}"
+            sitemap="${sitemap%%[$'\r\n']}"
 
-          while IFS=',' read -r folder site_name domain sitemap
-          do
-            if [ "$folder" = "folder" ]; then continue; fi
-            echo "=== Deploying ${site_name} (${domain}) from ${PUBLIC_ROOT}/${folder}"
+            # пропускаем пустые, заголовок и комментарии
+            [[ -z "${folder:-}" ]] && continue
+            [[ "$folder" == "folder" ]] && continue
+            [[ "$folder" =~ ^# ]] && continue
 
+            SRC_DIR="${PUBLIC_DIR}/${folder}"
+            echo "=== Deploy: site_name='${site_name}' domain='${domain}' src='${SRC_DIR}'"
+
+            if [[ ! -d "$SRC_DIR" ]]; then
+              echo "WARN: Source dir not found: $SRC_DIR — пропускаю"
+              continue
+            fi
+
+            # 3) Prod‑деплой на Netlify
+            # Если у тебя есть конкретный site-id, можно заменить --site "$site_name" на --site "<site-id>"
             netlify deploy \
               --auth="$NETLIFY_AUTH_TOKEN" \
-              --dir="${PUBLIC_ROOT}/${folder}" \
+              --dir="$SRC_DIR" \
               --site="$site_name" \
               --prod
 
-            if [ -n "$sitemap" ]; then
-              URL="https://${domain}/${sitemap}"
-            else
-              URL="https://${domain}/"
+            # 4) Пинг IndexNow (если есть домен)
+            if [[ -n "${domain:-}" ]]; then
+              if [[ -n "${sitemap:-}" ]]; then
+                URL="https://${domain}/${sitemap}"
+              else
+                URL="https://${domain}/"
+              fi
+
+              echo "Pinging IndexNow for ${domain} -> ${URL}"
+              curl -s -H 'Content-Type: application/json' \
+                -d "{\"host\":\"${domain}\",
+                     \"key\":\"${INDEXNOW_KEY}\",
+                     \"keyLocation\":\"https://${domain}/${INDEXNOW_KEY}.txt\",
+                     \"urlList\":[\"${URL}\"]}" \
+                https://api.indexnow.org/submit || true
             fi
 
-            curl -s -H 'Content-Type: application/json' \
-              -d "{\"host\":\"${domain}\",
-                   \"key\":\"${INDEXNOW_KEY}\",
-                   \"keyLocation\":\"https://${domain}/${INDEXNOW_KEY}.txt\",
-                   \"urlList\":[\"${URL}\"]}" \
-              https://api.indexnow.org/submit
-
-            echo "IndexNow ping sent for ${domain} -> ${URL}"
+            echo "=== Done: ${site_name} (${domain})"
           done < "$CSV_PATH"
-
-
-            echo "IndexNow ping sent for ${domain} -> ${URL}"
-          done < "$CSV_FILE"
