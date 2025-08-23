@@ -46,7 +46,7 @@ jobs:
         run: |
           netlify sites:list --json || true
 
-            - name: Deploy each site from CSV (auto-create if missing)
+      - name: Deploy each site from CSV (auto-create if missing)
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_TEAM: ${{ secrets.NETLIFY_TEAM }}
