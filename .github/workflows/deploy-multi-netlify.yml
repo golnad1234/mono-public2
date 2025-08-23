@@ -46,10 +46,9 @@ jobs:
         run: |
           netlify sites:list --json || true
 
-      - name: Deploy each site from CSV (auto-create if missing)
+            - name: Deploy each site from CSV (auto-create if missing)
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-          NETLIFY_TEAM: ${{ secrets.NETLIFY_TEAM }}
           INDEXNOW_KEY: ${{ secrets.INDEXNOW_KEY }}
           SITES_CSV: ${{ vars.SITES_CSV }}
           PUBLIC_ROOT: ${{ vars.PUBLIC_ROOT }}
@@ -57,41 +56,39 @@ jobs:
           set -euo pipefail
 
           CSV_FILE="${SITES_CSV:-PT/sites.csv}"
-          ROOT="${PUBLIC_ROOT:-.}"
+          ROOT="${PUBLIC_ROOT:-PT}"
           CSV_PATH="$GITHUB_WORKSPACE/$CSV_FILE"
 
           echo "Using CSV: $CSV_PATH"
           test -f "$CSV_PATH" || { echo "CSV not found"; exit 1; }
 
-          # удобная функция: есть ли сайт?
+          # Надёжная проверка наличия сайта по имени (без '--team')
           has_site () {
             local name="$1"
-            netlify sites:list --json \
-              | node -e "process.stdin.on('data',d=>{}); process.stdin.on('end',()=>{const a=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(a.some(s=>s.name==='${name}'))})"
+            JSON="$(netlify sites:list --json 2>/dev/null || echo '[]')"
+            # Если CLI ничего не вернул, защитимся
+            if [ -z "$JSON" ]; then JSON='[]'; fi
+            echo "$JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const a=JSON.parse(d||'[]');console.log(a.some(s=>s.name==='${name}'));}catch(e){console.log(false);}})"
           }
 
           while IFS=',' read -r folder site_name domain sitemap; do
-            # skip header/comments/empty
-            [[ -z "${folder:-}" ]] && continue
-            [[ "$folder" == "folder" ]] && continue
-            [[ "$folder" =~ ^# ]] && continue
+            # пропуск заголовка/пустых/комментариев
+            [ -z "${folder:-}" ] && continue
+            [ "$folder" = "folder" ] && continue
+            case "$folder" in \#*) continue;; esac
 
             SRC="${ROOT}/${folder}"
             echo "=== Site: '${site_name}'  domain='${domain}'  src='${SRC}'"
 
-            if [[ ! -d "$SRC" ]]; then
+            if [ ! -d "$SRC" ]; then
               echo "WARN: dir not found: $SRC — пропускаю"
               continue
             fi
 
-            # 1) если сайта нет — создаём
-            if [[ "$(has_site "$site_name")" != "true" ]]; then
+            # 1) создаём сайт при отсутствии
+            if [ "$(has_site "$site_name")" != "true" ]; then
               echo "Site '${site_name}' not found — creating..."
-              if [[ -n "${NETLIFY_TEAM:-}" ]]; then
-                netlify sites:create --name "$site_name" --team "$NETLIFY_TEAM"
-              else
-                netlify sites:create --name "$site_name"
-              fi
+              netlify sites:create --name "$site_name"
             else
               echo "Site '${site_name}' exists."
             fi
@@ -103,12 +100,16 @@ jobs:
               --site="$site_name" \
               --prod
 
-            # 3) IndexNow пинг
-            if [[ -n "${domain:-}" ]]; then
-              URL="https://${domain}/${sitemap:-}"
-              [[ -z "${sitemap:-}" ]] && URL="https://${domain}/"
+            # 3) пинг IndexNow
+            if [ -n "${domain:-}" ]; then
+              if [ -n "${sitemap:-}" ]; then
+                URL="https://${domain}/${sitemap}"
+              else
+                URL="https://${domain}/"
+              fi
               echo "Pinging IndexNow → $URL"
-              curl -s -H 'Content-Type: application/json' \
+              curl -s -o /dev/null -w "IndexNow HTTP %{http_code}\n" \
+                -H 'Content-Type: application/json' \
                 -d "{\"host\":\"${domain}\",
                      \"key\":\"${INDEXNOW_KEY}\",
                      \"keyLocation\":\"https://${domain}/${INDEXNOW_KEY}.txt\",
