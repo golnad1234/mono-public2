@@ -32,69 +32,82 @@ jobs:
           npm i -g netlify-cli
           netlify --version
 
-      - name: Deploy each site from CSV
+      - name: Netlify whoami
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+        run: |
+          netlify --version
+          netlify api getCurrentUser || true
+
+      - name: List Netlify sites (debug)
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_TEAM: ${{ secrets.NETLIFY_TEAM }}
+        run: |
+          netlify sites:list --json || true
+
+            - name: Deploy each site from CSV (auto-create if missing)
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_TEAM: ${{ secrets.NETLIFY_TEAM }}
           INDEXNOW_KEY: ${{ secrets.INDEXNOW_KEY }}
-          # Можно переопределить в Settings → Secrets and variables → Actions → Variables
           SITES_CSV: ${{ vars.SITES_CSV }}
           PUBLIC_ROOT: ${{ vars.PUBLIC_ROOT }}
         run: |
           set -euo pipefail
 
-          # 1) Пути по умолчанию
           CSV_FILE="${SITES_CSV:-PT/sites.csv}"
-          PUBLIC_DIR="${PUBLIC_ROOT:-.}"
-
+          ROOT="${PUBLIC_ROOT:-.}"
           CSV_PATH="$GITHUB_WORKSPACE/$CSV_FILE"
+
           echo "Using CSV: $CSV_PATH"
-          if [[ ! -f "$CSV_PATH" ]]; then
-            echo "ERROR: CSV not found at $CSV_PATH"
-            ls -la "$GITHUB_WORKSPACE"
-            exit 1
-          fi
+          test -f "$CSV_PATH" || { echo "CSV not found"; exit 1; }
 
-          # 2) Читаем CSV: folder,site_name,domain,sitemap
-          #    Пропускаем заголовок и строки-комменты (# ...)
-          #    Удаляем \r на случай CRLF
+          # удобная функция: есть ли сайт?
+          has_site () {
+            local name="$1"
+            netlify sites:list --json \
+              | node -e "process.stdin.on('data',d=>{}); process.stdin.on('end',()=>{const a=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(a.some(s=>s.name==='${name}'))})"
+          }
+
           while IFS=',' read -r folder site_name domain sitemap; do
-            # trim CR
-            folder="${folder%%[$'\r\n']}"
-            site_name="${site_name%%[$'\r\n']}"
-            domain="${domain%%[$'\r\n']}"
-            sitemap="${sitemap%%[$'\r\n']}"
-
-            # пропускаем пустые, заголовок и комментарии
+            # skip header/comments/empty
             [[ -z "${folder:-}" ]] && continue
             [[ "$folder" == "folder" ]] && continue
             [[ "$folder" =~ ^# ]] && continue
 
-            SRC_DIR="${PUBLIC_DIR}/${folder}"
-            echo "=== Deploy: site_name='${site_name}' domain='${domain}' src='${SRC_DIR}'"
+            SRC="${ROOT}/${folder}"
+            echo "=== Site: '${site_name}'  domain='${domain}'  src='${SRC}'"
 
-            if [[ ! -d "$SRC_DIR" ]]; then
-              echo "WARN: Source dir not found: $SRC_DIR — пропускаю"
+            if [[ ! -d "$SRC" ]]; then
+              echo "WARN: dir not found: $SRC — пропускаю"
               continue
             fi
 
-            # 3) Prod‑деплой на Netlify
-            # Если у тебя есть конкретный site-id, можно заменить --site "$site_name" на --site "<site-id>"
+            # 1) если сайта нет — создаём
+            if [[ "$(has_site "$site_name")" != "true" ]]; then
+              echo "Site '${site_name}' not found — creating..."
+              if [[ -n "${NETLIFY_TEAM:-}" ]]; then
+                netlify sites:create --name "$site_name" --team "$NETLIFY_TEAM"
+              else
+                netlify sites:create --name "$site_name"
+              fi
+            else
+              echo "Site '${site_name}' exists."
+            fi
+
+            # 2) деплой
             netlify deploy \
               --auth="$NETLIFY_AUTH_TOKEN" \
-              --dir="$SRC_DIR" \
+              --dir="$SRC" \
               --site="$site_name" \
               --prod
 
-            # 4) Пинг IndexNow (если есть домен)
+            # 3) IndexNow пинг
             if [[ -n "${domain:-}" ]]; then
-              if [[ -n "${sitemap:-}" ]]; then
-                URL="https://${domain}/${sitemap}"
-              else
-                URL="https://${domain}/"
-              fi
-
-              echo "Pinging IndexNow for ${domain} -> ${URL}"
+              URL="https://${domain}/${sitemap:-}"
+              [[ -z "${sitemap:-}" ]] && URL="https://${domain}/"
+              echo "Pinging IndexNow → $URL"
               curl -s -H 'Content-Type: application/json' \
                 -d "{\"host\":\"${domain}\",
                      \"key\":\"${INDEXNOW_KEY}\",
@@ -103,5 +116,6 @@ jobs:
                 https://api.indexnow.org/submit || true
             fi
 
-            echo "=== Done: ${site_name} (${domain})"
+            echo "=== Done: $site_name"
           done < "$CSV_PATH"
+
