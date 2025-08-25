@@ -59,7 +59,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          CSV_FILE="${SITES_CSV:-sites.csv}"   # твой CSV с колонками: folder,site_name,domain,sitemap
+          CSV_FILE="${SITES_CSV:-PT/sites.csv}"   # твой CSV с колонками: folder,site_name,domain,sitemap
           ROOT="${PUBLIC_ROOT:-.}"             # корень репозитория/папок (для тебя это просто ".")
           CSV_PATH="$CSV_FILE"
           
