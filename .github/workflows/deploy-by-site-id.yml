@@ -7,10 +7,6 @@ on:
         description: 'Путь к CSV с колонками: folder,site_name,domain,sitemap'
         required: true
         default: 'PT/sites.csv'
-      public_root:
-        description: 'Корень папок с сайтами (PUBLIC_ROOT)'
-        required: true
-        default: 'PT'
   push:
     paths:
       - 'PT/sites.csv'
@@ -27,7 +23,7 @@ jobs:
       contents: read
     env:
       CSV_PATH: ${{ github.event.inputs.csv_path || 'PT/sites.csv' }}
-      PUBLIC_ROOT: ${{ github.event.inputs.public_root || vars.PUBLIC_ROOT }}
+      PUBLIC_ROOT: ${{ vars.PUBLIC_ROOT }}
 
     steps:
       - name: Checkout repo
