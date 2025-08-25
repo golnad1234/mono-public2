@@ -22,6 +22,16 @@ jobs:
           ls -la
           find . -maxdepth 3 -type f -name "sites.csv" -print
 
+      - name: Show CSV (debug)
+        env:
+          SITES_CSV: ${{ vars.SITES_CSV }}
+        run: |
+          FILE="${SITES_CSV:-PT/sites.csv}"
+          echo "CSV used: $FILE"
+          nl -ba "$FILE"
+          echo "-----"
+          echo "Total lines:"; wc -l "$FILE"
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -46,77 +56,160 @@ jobs:
         run: |
           netlify sites:list --json || true
 
-      - name: Deploy each site from CSV (auto-create if missing)
+      - name: Deploy each site from CSV (robust, by site_id, team-aware, emits PT/sites_by_id.csv)
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_TEAM: ${{ secrets.NETLIFY_TEAM }}      
           INDEXNOW_KEY: ${{ secrets.INDEXNOW_KEY }}
           SITES_CSV: ${{ vars.SITES_CSV }}
           PUBLIC_ROOT: ${{ vars.PUBLIC_ROOT }}
         run: |
           set -euo pipefail
-
+      
           CSV_FILE="${SITES_CSV:-PT/sites.csv}"
           ROOT="${PUBLIC_ROOT:-PT}"
           CSV_PATH="$GITHUB_WORKSPACE/$CSV_FILE"
-
-          echo "Using CSV: $CSV_PATH"
-          test -f "$CSV_PATH" || { echo "CSV not found"; exit 1; }
-
-          # Надёжная проверка наличия сайта по имени (без '--team')
+      
+          [ -f "$CSV_PATH" ] || { echo "CSV not found: $CSV_PATH"; exit 1; }
+      
+          # Единые флаги для всех команд Netlify (одна и та же тима)
+          NL_FLAGS=(--auth="$NETLIFY_AUTH_TOKEN")
+          if [[ -n "${NETLIFY_TEAM:-}" ]]; then
+            NL_FLAGS+=(--account-slug "$NETLIFY_TEAM")
+          fi
+      
+          # Утилита: trim пробелы по краям
+          trim() { local s="${1:-}"; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }
+      
+          # helpers (везде используем одну и ту же team/account)
           has_site () {
             local name="$1"
-            JSON="$(netlify sites:list --json 2>/dev/null || echo '[]')"
-            # Если CLI ничего не вернул, защитимся
-            if [ -z "$JSON" ]; then JSON='[]'; fi
-            echo "$JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const a=JSON.parse(d||'[]');console.log(a.some(s=>s.name==='${name}'));}catch(e){console.log(false);}})"
+            netlify sites:list "${NL_FLAGS[@]}" --json 2>/dev/null \
+            | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const a=JSON.parse(d||'[]');console.log(a.some(s=>s.name==='${name}'));}catch{console.log(false)}})"
           }
-
-          while IFS=',' read -r folder site_name domain sitemap; do
-            # пропуск заголовка/пустых/комментариев
-            [ -z "${folder:-}" ] && continue
-            [ "$folder" = "folder" ] && continue
-            case "$folder" in \#*) continue;; esac
-
+      
+          get_site_id () {
+            local name="$1"
+            netlify sites:list "${NL_FLAGS[@]}" --json 2>/dev/null \
+            | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const a=JSON.parse(d||'[]');const s=a.find(x=>x.name==='${name}');console.log(s?(s.id||s.site_id||''):'');}catch{console.log('')}})"
+          }
+      
+          wait_site_id () {
+            local name="$1"; local id=""
+            for i in {1..10}; do
+              id="$(get_site_id "$name")"
+              [[ -n "$id" ]] && { echo "$id"; return 0; }
+              echo "  waiting site_id for '${name}' (try $i/10)..."
+              sleep 2
+            done
+            echo ""
+          }
+      
+          failures=()
+      
+          # === Подготовка выходного CSV: пишем во временный файл и в конце атомарно заменяем
+          mkdir -p "$GITHUB_WORKSPACE/$ROOT"
+          OUTPUT_CSV="$GITHUB_WORKSPACE/$ROOT/sites_by_id.csv"
+          TMP_CSV="${OUTPUT_CSV}.tmp"
+          echo "folder,site_id,domain,sitemap" > "$TMP_CSV"
+      
+          echo "Reading CSV: $CSV_PATH"
+          # Нормализуем CRLF -> LF и читаем CSV: folder,site_name,domain,sitemap
+          # Пропускаем строку заголовка/пустые/комментарии
+          while IFS=',' read -r folder site_name domain sitemap _extra; do
+            # убрать \r и пробелы
+            folder="$(trim "${folder//$'\r'/}")"
+            site_name="$(trim "${site_name//$'\r'/}")"
+            domain="$(trim "${domain//$'\r'/}")"
+            sitemap="$(trim "${sitemap//$'\r'/}")"
+      
+            [[ -z "${folder:-}" ]] && continue
+            [[ "${folder,,}" == "folder" ]] && continue
+            [[ "${folder:0:1}" == "#" ]] && continue
+      
             SRC="${ROOT}/${folder}"
-            echo "=== Site: '${site_name}'  domain='${domain}'  src='${SRC}'"
-
-            if [ ! -d "$SRC" ]; then
+      
+            # slug: берём site_name, если есть, иначе из домена
+            base_slug="${site_name:-$domain}"
+            base_slug="${base_slug,,}"
+            SITE_SLUG="${base_slug//./-}"     # точки → дефисы
+            SITE_SLUG="${SITE_SLUG// /-}"     # пробелы → дефисы
+      
+            echo "=== Site: raw_site='${site_name}' domain='${domain}' → slug='${SITE_SLUG}' src='${SRC}'"
+      
+            if [[ ! -d "$GITHUB_WORKSPACE/$SRC" ]]; then
               echo "WARN: dir not found: $SRC — пропускаю"
-              continue
+              failures+=("${SITE_SLUG}:no-dir")
+              # даже если папки нет, сайт/ID нам может пригодиться в будущем — создадим и сохраним ID
             fi
-
-            # 1) создаём сайт при отсутствии
-            if [ "$(has_site "$site_name")" != "true" ]; then
-              echo "Site '${site_name}' not found — creating..."
-              netlify sites:create --name "$site_name"
-            else
-              echo "Site '${site_name}' exists."
-            fi
-
-            # 2) деплой
-            netlify deploy \
-              --auth="$NETLIFY_AUTH_TOKEN" \
-              --dir="$SRC" \
-              --site="$site_name" \
-              --prod
-
-            # 3) пинг IndexNow
-            if [ -n "${domain:-}" ]; then
-              if [ -n "${sitemap:-}" ]; then
-                URL="https://${domain}/${sitemap}"
+      
+            (
+              set -euo pipefail
+      
+              if [[ "$(has_site "$SITE_SLUG")" != "true" ]]; then
+                echo "Creating site '${SITE_SLUG}' in team '${NETLIFY_TEAM:-default}'..."
+                netlify sites:create "${NL_FLAGS[@]}" --name "$SITE_SLUG"
               else
-                URL="https://${domain}/"
+                echo "Site '${SITE_SLUG}' already exists (team '${NETLIFY_TEAM:-default}')."
               fi
-              echo "Pinging IndexNow → $URL"
-              curl -s -o /dev/null -w "IndexNow HTTP %{http_code}\n" \
-                -H 'Content-Type: application/json' \
-                -d "{\"host\":\"${domain}\",
-                     \"key\":\"${INDEXNOW_KEY}\",
-                     \"keyLocation\":\"https://${domain}/${INDEXNOW_KEY}.txt\",
-                     \"urlList\":[\"${URL}\"]}" \
-                https://api.indexnow.org/submit || true
-            fi
-
-            echo "=== Done: $site_name"
-          done < "$CSV_PATH"
-
+      
+              SITE_ID="$(wait_site_id "$SITE_SLUG")"
+              if [[ -z "$SITE_ID" ]]; then
+                echo "ERROR: cannot resolve site_id for ${SITE_SLUG}"
+                false
+              fi
+              echo "Using site_id=${SITE_ID}"
+      
+              # --- сразу сохраняем строку в выходной CSV (даже если деплой будет пропущен/упадёт)
+              printf '%s,%s,%s,%s\n' "$folder" "$SITE_ID" "$domain" "$sitemap" >> "$TMP_CSV"
+      
+              # Деплой контента, если директория существует и не пуста
+              if [[ -d "$GITHUB_WORKSPACE/$SRC" ]]; then
+                FILES_COUNT=$(find "$GITHUB_WORKSPACE/$SRC" -type f | wc -l | tr -d ' ')
+                if [[ "$FILES_COUNT" -gt 0 ]]; then
+                  netlify deploy \
+                    "${NL_FLAGS[@]}" \
+                    --dir="$GITHUB_WORKSPACE/$SRC" \
+                    --site="$SITE_ID" \
+                    --prod
+                else
+                  echo "WARN: $SRC is empty (0 files) — пропускаю деплой"
+                fi
+              else
+                echo "INFO: no SRC dir → деплой пропущен (ID уже сохранён в CSV)"
+              fi
+      
+              if [[ -n "${domain:-}" ]]; then
+                URL="https://${domain}/"
+                [[ -n "${sitemap:-}" ]] && URL="https://${domain}/${sitemap}"
+                echo "Pinging IndexNow → $URL"
+                curl -s -o /dev/null -w "IndexNow HTTP %{http_code}\n" \
+                  -H 'Content-Type: application/json' \
+                  -d "{\"host\":\"${domain}\", \"key\":\"${INDEXNOW_KEY}\", \"keyLocation\":\"https://${domain}/${INDEXNOW_KEY}.txt\", \"urlList\":[\"${URL}\"]}" \
+                  https://api.indexnow.org/submit || true
+              fi
+      
+              echo "=== Done: ${SITE_SLUG}"
+            ) || {
+              echo "FAILED: ${SITE_SLUG}"
+              failures+=("${SITE_SLUG}:error")
+              continue
+            }
+      
+          done < <(tr -d '\r' < "$CSV_PATH")
+      
+          # Атомарно заменяем итоговый CSV
+          mv -f "$TMP_CSV" "$OUTPUT_CSV"
+          echo
+          echo "Generated IDs file: $OUTPUT_CSV"
+          echo "Preview:"
+          nl -ba "$OUTPUT_CSV" | sed -n '1,50p'
+      
+          echo
+          if (( ${#failures[@]} )); then
+            echo "Some sites had issues: ${failures[*]}"
+            # не валим пайплайн: файл с ID всё равно пригодится следующему шагу
+            exit 0
+          else
+            echo "All sites processed."
+          fi

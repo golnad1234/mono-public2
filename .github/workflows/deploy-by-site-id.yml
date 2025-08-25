@@ -1,0 +1,70 @@
+name: Deploy by site_id (standalone)
+
+on:
+  workflow_dispatch:
+    inputs:
+      csv_path:
+        description: 'Путь к CSV с колонками: folder,site_name,domain,sitemap'
+        required: true
+        default: 'PT/sites.csv'
+      public_root:
+        description: 'Корень папок с сайтами (PUBLIC_ROOT)'
+        required: true
+        default: 'PT'
+  push:
+    paths:
+      - 'PT/sites.csv'
+      - '.github/scripts/deploy_by_site_id.sh'
+
+concurrency:
+  group: deploy-by-site-id-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CSV_PATH: ${{ github.event.inputs.csv_path || 'PT/sites.csv' }}
+      PUBLIC_ROOT: ${{ github.event.inputs.public_root || vars.PUBLIC_ROOT || 'PT' }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Ensure CSV exists & normalize newlines
+        id: csv
+        run: |
+          set -euo pipefail
+          ABS_CSV="$GITHUB_WORKSPACE/${CSV_PATH}"
+          echo "ABS_CSV=$ABS_CSV" >> "$GITHUB_OUTPUT"
+          echo "Using CSV: $ABS_CSV"
+          test -f "$ABS_CSV" || { echo "CSV not found: $ABS_CSV"; ls -la "$GITHUB_WORKSPACE"; exit 1; }
+          sed -i 's/\r$//' "$ABS_CSV"
+          echo "--- head ---"
+          head -n 10 "$ABS_CSV" || true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Netlify CLI
+        run: |
+          npm i -g netlify-cli
+          netlify --version
+
+      - name: Prepare deploy script
+        run: |
+          sed -i 's/\r$//' .github/scripts/deploy_by_site_id.sh
+          chmod +x .github/scripts/deploy_by_site_id.sh
+          head -n 5 .github/scripts/deploy_by_site_id.sh
+
+      - name: Deploy folders by site_name → site_id
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          INDEXNOW_KEY: ${{ secrets.INDEXNOW_KEY }}
+          PUBLIC_ROOT: ${{ env.PUBLIC_ROOT }}
+        run: |
+          bash .github/scripts/deploy_by_site_id.sh "${{ steps.csv.outputs.ABS_CSV }}"
