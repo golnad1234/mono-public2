@@ -67,7 +67,7 @@ jobs:
           set -euo pipefail
       
           CSV_FILE="${SITES_CSV:-PT/sites.csv}"
-          ROOT="${PUBLIC_ROOT:-PT}"
+          ROOT="${PUBLIC_ROOT:-.}"               # было PT
           CSV_PATH="$GITHUB_WORKSPACE/$CSV_FILE"
       
           [ -f "$CSV_PATH" ] || { echo "CSV not found: $CSV_PATH"; exit 1; }
@@ -126,8 +126,13 @@ jobs:
             [[ -z "${folder:-}" ]] && continue
             [[ "${folder,,}" == "folder" ]] && continue
             [[ "${folder:0:1}" == "#" ]] && continue
-      
-            SRC="${ROOT}/${folder}"
+    
+
+            if [[ "${folder:0:1}" == "/" ]]; then
+              folder="${folder#/}"
+            fi
+
+            SRC="$(printf "%s/%s" "$ROOT" "$folder" | sed 's#//*#/#g')"
       
             # slug: берём site_name, если есть, иначе из домена
             base_slug="${site_name:-$domain}"
