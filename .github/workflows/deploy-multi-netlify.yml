@@ -58,35 +58,33 @@ jobs:
           PUBLIC_ROOT: ${{ vars.PUBLIC_ROOT }}
         run: |
           set -euo pipefail
-      
-          CSV_FILE="${SITES_CSV:-PT/sites.csv}"
-          ROOT="${PUBLIC_ROOT:-.}"               # было PT
+
+          CSV_FILE="${SITES_CSV:-sites.csv}"   # твой CSV с колонками: folder,site_name,domain,sitemap
+          ROOT="${PUBLIC_ROOT:-.}"             # корень репозитория/папок (для тебя это просто ".")
           CSV_PATH="$CSV_FILE"
-      
+          
           [ -f "$CSV_PATH" ] || { echo "CSV not found: $CSV_PATH"; exit 1; }
-      
-          # Единые флаги для всех команд Netlify (одна и та же тима)
+          
+          # Общие флаги для Netlify
           NL_FLAGS=(--auth="$NETLIFY_AUTH_TOKEN")
           if [[ -n "${NETLIFY_TEAM:-}" ]]; then
             NL_FLAGS+=(--account-slug "$NETLIFY_TEAM")
           fi
-      
-          # Утилита: trim пробелы по краям
+          
           trim() { local s="${1:-}"; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }
-      
-          # helpers (везде используем одну и ту же team/account)
+          
           has_site () {
             local name="$1"
             netlify sites:list "${NL_FLAGS[@]}" --json 2>/dev/null \
             | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const a=JSON.parse(d||'[]');console.log(a.some(s=>s.name==='${name}'));}catch{console.log(false)}})"
           }
-      
+          
           get_site_id () {
             local name="$1"
             netlify sites:list "${NL_FLAGS[@]}" --json 2>/dev/null \
             | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const a=JSON.parse(d||'[]');const s=a.find(x=>x.name==='${name}');console.log(s?(s.id||s.site_id||''):'');}catch{console.log('')}})"
           }
-      
+          
           wait_site_id () {
             local name="$1"; local id=""
             for i in {1..10}; do
@@ -97,86 +95,77 @@ jobs:
             done
             echo ""
           }
-      
+          
           failures=()
-      
-          # === Подготовка выходного CSV: пишем во временный файл и в конце атомарно заменяем
+          
           mkdir -p "$GITHUB_WORKSPACE/$ROOT"
           OUTPUT_CSV="$GITHUB_WORKSPACE/$ROOT/sites_by_id.csv"
           TMP_CSV="${OUTPUT_CSV}.tmp"
           echo "folder,site_id,domain,sitemap" > "$TMP_CSV"
-      
+          
           echo "Reading CSV: $CSV_PATH"
-          # Нормализуем CRLF -> LF и читаем CSV: folder,site_name,domain,sitemap
-          # Пропускаем строку заголовка/пустые/комментарии
-          while IFS=',' read -r folder site_name domain sitemap _extra; do
-            # убрать \r и пробелы
+          # Читаем строго 4 колонки: folder,site_name,domain,sitemap
+          # Папка из 'folder' может содержать вложенность и пробелы (например: UK/William Hill/WilliamHill.com)
+          while IFS=',' read -r folder site_name domain sitemap; do
             folder="$(trim "${folder//$'\r'/}")"
             site_name="$(trim "${site_name//$'\r'/}")"
             domain="$(trim "${domain//$'\r'/}")"
             sitemap="$(trim "${sitemap//$'\r'/}")"
-      
-            [[ -z "${folder:-}" ]] && continue
+          
+            [[ -z "$folder" ]] && continue
             [[ "${folder,,}" == "folder" ]] && continue
             [[ "${folder:0:1}" == "#" ]] && continue
-    
-
-            if [[ "${folder:0:1}" == "/" ]]; then
-              folder="${folder#/}"
-            fi
-
-            SRC="$(printf "%s/%s" "$ROOT" "$folder" | sed 's#//*#/#g')"
-      
-            # slug: берём site_name, если есть, иначе из домена
+          
+            # Нормализуем путь из folder относительно ROOT, без ведущих слэшей, схлопываем //
+            rel="${folder#/}"
+            SRC="$(printf "%s/%s" "$ROOT" "$rel" | sed 's#//*#/#g')"
+          
+            # slug для Netlify из site_name (или домена)
             base_slug="${site_name:-$domain}"
             base_slug="${base_slug,,}"
-            SITE_SLUG="${base_slug//./-}"     # точки → дефисы
-            SITE_SLUG="${SITE_SLUG// /-}"     # пробелы → дефисы
-      
-            echo "=== Site: raw_site='${site_name}' domain='${domain}' → slug='${SITE_SLUG}' src='${SRC}'"
-      
-            if [[ ! -d "$GITHUB_WORKSPACE/$SRC" ]]; then
-              echo "WARN: dir not found: $SRC — пропускаю"
-              failures+=("${SITE_SLUG}:no-dir")
-              # даже если папки нет, сайт/ID нам может пригодиться в будущем — создадим и сохраним ID
-            fi
-      
+            SITE_SLUG="${base_slug//./-}"
+            SITE_SLUG="${SITE_SLUG// /-}"
+          
+            echo "=== Site: folder='${folder}' domain='${domain}' → slug='${SITE_SLUG}' src='${SRC}'"
+          
             (
               set -euo pipefail
-      
+          
               if [[ "$(has_site "$SITE_SLUG")" != "true" ]]; then
-                echo "Creating site '${SITE_SLUG}' in team '${NETLIFY_TEAM:-default}'..."
+                echo "Creating site '${SITE_SLUG}'..."
                 netlify sites:create "${NL_FLAGS[@]}" --name "$SITE_SLUG"
               else
-                echo "Site '${SITE_SLUG}' already exists (team '${NETLIFY_TEAM:-default}')."
+                echo "Site '${SITE_SLUG}' already exists."
               fi
-      
+          
               SITE_ID="$(wait_site_id "$SITE_SLUG")"
               if [[ -z "$SITE_ID" ]]; then
                 echo "ERROR: cannot resolve site_id for ${SITE_SLUG}"
                 false
               fi
               echo "Using site_id=${SITE_ID}"
-      
-              # --- сразу сохраняем строку в выходной CSV (даже если деплой будет пропущен/упадёт)
+          
+              # Сохраняем строку в итоговый CSV
               printf '%s,%s,%s,%s\n' "$folder" "$SITE_ID" "$domain" "$sitemap" >> "$TMP_CSV"
-      
-              # Деплой контента, если директория существует и не пуста
+          
+              # Деплой только если папка существует и не пуста
               if [[ -d "$GITHUB_WORKSPACE/$SRC" ]]; then
                 FILES_COUNT=$(find "$GITHUB_WORKSPACE/$SRC" -type f | wc -l | tr -d ' ')
                 if [[ "$FILES_COUNT" -gt 0 ]]; then
+                  echo "Deploying dir: $GITHUB_WORKSPACE/$SRC"
                   netlify deploy \
                     "${NL_FLAGS[@]}" \
                     --dir="$GITHUB_WORKSPACE/$SRC" \
                     --site="$SITE_ID" \
                     --prod
                 else
-                  echo "WARN: $SRC is empty (0 files) — пропускаю деплой"
+                  echo "WARN: $SRC is empty — skip deploy"
                 fi
               else
-                echo "INFO: no SRC dir → деплой пропущен (ID уже сохранён в CSV)"
+                echo "INFO: dir not found: $SRC — skip deploy (ID saved)"
               fi
-      
+          
+              # IndexNow (если указан домен)
               if [[ -n "${domain:-}" ]]; then
                 URL="https://${domain}/"
                 [[ -n "${sitemap:-}" ]] && URL="https://${domain}/${sitemap}"
@@ -186,27 +175,24 @@ jobs:
                   -d "{\"host\":\"${domain}\", \"key\":\"${INDEXNOW_KEY}\", \"keyLocation\":\"https://${domain}/${INDEXNOW_KEY}.txt\", \"urlList\":[\"${URL}\"]}" \
                   https://api.indexnow.org/submit || true
               fi
-      
+          
               echo "=== Done: ${SITE_SLUG}"
             ) || {
               echo "FAILED: ${SITE_SLUG}"
               failures+=("${SITE_SLUG}:error")
               continue
             }
-      
+          
           done < <(tr -d '\r' < "$CSV_PATH")
-      
-          # Атомарно заменяем итоговый CSV
+          
           mv -f "$TMP_CSV" "$OUTPUT_CSV"
           echo
           echo "Generated IDs file: $OUTPUT_CSV"
-          echo "Preview:"
           nl -ba "$OUTPUT_CSV" | sed -n '1,50p'
-      
+          
           echo
           if (( ${#failures[@]} )); then
             echo "Some sites had issues: ${failures[*]}"
-            # не валим пайплайн: файл с ID всё равно пригодится следующему шагу
             exit 0
           else
             echo "All sites processed."
