@@ -49,13 +49,6 @@ jobs:
           netlify --version
           netlify api getCurrentUser || true
 
-      - name: List Netlify sites (debug)
-        env:
-          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-          NETLIFY_TEAM: ${{ secrets.NETLIFY_TEAM }}
-        run: |
-          netlify sites:list --json || true
-
       - name: Deploy each site from CSV (robust, by site_id, team-aware, emits PT/sites_by_id.csv)
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
