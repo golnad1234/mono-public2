@@ -131,14 +131,44 @@ jobs:
             (
               set -euo pipefail
           
-              if [[ "$(has_site "$SITE_SLUG")" != "true" ]]; then
-                echo "Creating site '${SITE_SLUG}'..."
-                netlify sites:create "${NL_FLAGS[@]}" --name "$SITE_SLUG"
-              else
-                echo "Site '${SITE_SLUG}' already exists."
+              # 1) Убедимся, что есть токен
+              if [[ -z "${NETLIFY_AUTH_TOKEN:-}" ]]; then
+                echo "ERROR: NETLIFY_AUTH_TOKEN is empty"; exit 20
               fi
-          
-              SITE_ID="$(wait_site_id "$SITE_SLUG")"
+              
+              # 2) Если команда (team) не задана, возьмём первую доступную
+              if [[ -z "${NETLIFY_TEAM:-}" ]]; then
+                echo "Auto-detecting Netlify team slug…"
+                NETLIFY_TEAM="$(netlify api listAccountsForUser --json 2>/dev/null \
+                  | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const a=JSON.parse(d||'[]');const t=(a||[]).find(x=>x&&x.slug);console.log(t?t.slug:'');}catch(e){console.log('');}})")"
+                if [[ -z "${NETLIFY_TEAM:-}" ]]; then
+                  echo "ERROR: cannot detect team slug. Set NETLIFY_TEAM secret/variable."; exit 21
+                fi
+                echo "Using team: ${NETLIFY_TEAM}"
+              fi
+              
+              # 3) Есть ли такой сайт?
+              SITE_ID="$(get_site_id "$SITE_SLUG")"
+              
+              # 4) Если нет — создадим ЧЕРЕЗ REST (неинтерактивно)
+              if [[ -z "$SITE_ID" ]]; then
+                echo "Creating site '${SITE_SLUG}' via Netlify API (team='${NETLIFY_TEAM}')…"
+                CREATE_JSON="$(netlify api createSite \
+                  --data "{\"name\":\"${SITE_SLUG}\",\"account_slug\":\"${NETLIFY_TEAM}\"}" --json 2>/dev/null || true)"
+                SITE_ID="$(echo "$CREATE_JSON" \
+                  | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const o=JSON.parse(d||'{}');console.log(o.id||o.site_id||'');}catch(e){console.log('');}})")"
+              fi
+              
+              # 5) Ещё раз проверим (на случай гонок)
+              if [[ -z "$SITE_ID" ]]; then
+                SITE_ID="$(wait_site_id "$SITE_SLUG")"
+              fi
+              
+              if [[ -z "$SITE_ID" ]]; then
+                echo "ERROR: cannot resolve site_id for ${SITE_SLUG}"; exit 22
+              fi
+              echo "Using site_id=${SITE_ID}"
+
               if [[ -z "$SITE_ID" ]]; then
                 echo "ERROR: cannot resolve site_id for ${SITE_SLUG}"
                 false
