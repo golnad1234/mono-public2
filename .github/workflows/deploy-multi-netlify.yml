@@ -61,7 +61,7 @@ jobs:
       
           CSV_FILE="${SITES_CSV:-PT/sites.csv}"
           ROOT="${PUBLIC_ROOT:-.}"               # было PT
-          CSV_PATH="$GITHUB_WORKSPACE/$CSV_FILE"
+          CSV_PATH="$CSV_FILE"
       
           [ -f "$CSV_PATH" ] || { echo "CSV not found: $CSV_PATH"; exit 1; }
       
