@@ -27,7 +27,7 @@ jobs:
       contents: read
     env:
       CSV_PATH: ${{ github.event.inputs.csv_path || 'PT/sites.csv' }}
-      PUBLIC_ROOT: ${{ github.event.inputs.public_root || vars.PUBLIC_ROOT || 'PT' }}
+      PUBLIC_ROOT: ${{ github.event.inputs.public_root || vars.PUBLIC_ROOT }}
 
     steps:
       - name: Checkout repo
